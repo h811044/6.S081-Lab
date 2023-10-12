@@ -1,0 +1,317 @@
+commit 3ab5805d8416cb8ef7cd3f91f34736c42921826e
+Author: h811044 <142477229+h811044@users.noreply.github.com>
+Date:   Wed Sep 20 09:22:04 2023 +0800
+
+    Lab: Xv6 and Unix utilities
+
+diff --git a/Makefile b/Makefile
+index c926b7e..e297ffe 100644
+--- a/Makefile
++++ b/Makefile
+@@ -179,6 +179,7 @@ mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
+ UPROGS=\
+ 	$U/_cat\
+ 	$U/_echo\
++	$U/_find\
+ 	$U/_forktest\
+ 	$U/_grep\
+ 	$U/_init\
+@@ -186,12 +187,16 @@ UPROGS=\
+ 	$U/_ln\
+ 	$U/_ls\
+ 	$U/_mkdir\
++	$U/_pingpong\
++	$U/_primes\
+ 	$U/_rm\
+ 	$U/_sh\
++	$U/_sleep\
+ 	$U/_stressfs\
+ 	$U/_usertests\
+ 	$U/_grind\
+ 	$U/_wc\
++	$U/_xargs\
+ 	$U/_zombie\
+ 
+ 
+diff --git a/user/find.c b/user/find.c
+new file mode 100644
+index 0000000..8b3468b
+--- /dev/null
++++ b/user/find.c
+@@ -0,0 +1,77 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++#include "kernel/fs.h"
++
++void
++find(char *path, char *name)
++{
++    char buf[512], *p;
++    int fd;
++    struct dirent de;
++    struct stat st;
++
++    if((fd = open(path, 0)) < 0){
++        fprintf(2, "find: cannot open %s\n", path);
++        return;
++    }
++
++    if(fstat(fd, &st) < 0){
++        fprintf(2, "find: cannot stat %s\n", path);
++        close(fd);
++        return;
++    }
++
++    switch(st.type){
++        case T_FILE:
++            printf("find: path is not a dir\n");
++            break;
++
++        case T_DIR:
++            if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
++                printf("find: path too long\n");
++                break;
++            }
++            strcpy(buf, path);
++            p = buf+strlen(buf);
++            *p++ = '/';
++            while(read(fd, &de, sizeof(de)) == sizeof(de)){
++                if(de.inum == 0){
++                    continue;
++                }
++                memmove(p, de.name, DIRSIZ);
++                p[DIRSIZ] = 0;
++                if(stat(buf, &st) < 0){
++                    printf("find: cannot stat %s\n", buf);
++                    continue;
++                }
++                switch(st.type){
++                    case T_FILE:
++                        if(strcmp(de.name, name) == 0){
++                            printf("%s\n", buf);
++                        }
++                        break;
++                    case T_DIR:
++                        if(strcmp(de.name, ".") && strcmp(de.name, "..")){
++                            find(buf, name);
++                        }
++                        break;
++                }
++            }
++            break;
++    }
++    close(fd);
++}
++
++int
++main(int argc, char *argv[])
++{
++    if(argc < 3){
++        fprintf(2, "Usage: find <path> <name>\n");
++        exit(1);
++    }
++
++    // Look at user/ls.c to see how to read directories.
++    find(argv[1], argv[2]);
++    exit(0);
++}
+diff --git a/user/pingpong.c b/user/pingpong.c
+new file mode 100644
+index 0000000..1004e98
+--- /dev/null
++++ b/user/pingpong.c
+@@ -0,0 +1,28 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int
++main()
++{
++    int n, pid;
++    int fds[2];
++    char buf[10];
++
++    // create a pipe, with two FDs in fds[0], fds[1].
++    pipe(fds);
++
++    pid = fork();
++    if(pid == 0){
++        n = read(fds[0], buf, sizeof(buf));
++        printf("%d: received ping\n", getpid());
++        write(fds[1], buf, n);
++        exit(0);
++    } else {
++        write(fds[1], "ball", 4);
++        wait((int *)0);
++        read(fds[0], buf, sizeof(buf));
++        printf("%d: received pong\n", getpid());
++    }
++
++    exit(0);
++}
+diff --git a/user/primes.c b/user/primes.c
+new file mode 100644
+index 0000000..d04c05f
+--- /dev/null
++++ b/user/primes.c
+@@ -0,0 +1,63 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int
++main()
++{
++    int n, p, pid, fd, cont;
++    int fds[2];
++
++    // create a pipe, with two FDs in fds[0], fds[1].
++    pipe(fds);
++
++    pid = fork();
++    if(pid == 0){
++        while(1){
++            fd = fds[0];
++            close(fds[1]);
++
++            // p = get a number from left neighbor
++            cont = read(fd, &p, sizeof(int));
++
++            // print p
++            if(cont){
++                printf("prime %d\n", p);
++                pipe(fds);
++                pid = fork();
++            } else {
++                exit(0);
++            }
++
++            if(pid == 0){
++                close(fd);
++            } else {
++                close(fds[0]);
++
++                // loop: n = get a number from left neighbor
++                while(read(fd, &n, sizeof(int)) == sizeof(int)){
++                    // if (p does not divide n)
++                    if(n % p){
++                        // send n to right neighbor
++                        write(fds[1], &n, sizeof(int));
++                    }
++                }
++                close(fd);
++                close(fds[1]);
++
++                while(wait((int *)0) > 0){}
++                exit(0);
++            }
++        }
++    } else {
++        close(fds[0]);
++
++        for(int i = 2; i < 36; i++){
++            write(fds[1], &i, sizeof(int));
++        }
++        close(fds[1]);
++
++        while(wait((int *)0) > 0){}
++    }
++
++    exit(0);
++}
+diff --git a/user/sleep.c b/user/sleep.c
+new file mode 100644
+index 0000000..d5ba09a
+--- /dev/null
++++ b/user/sleep.c
+@@ -0,0 +1,18 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int
++main(int argc, char *argv[])
++{
++    int i;
++
++    if(argc < 2){
++        fprintf(2, "Usage: sleep <n>\n");
++        exit(1);
++    }
++
++    i = atoi(argv[1]);
++    sleep(i);
++
++    exit(0);
++}
+diff --git a/user/xargs.c b/user/xargs.c
+new file mode 100644
+index 0000000..ac57445
+--- /dev/null
++++ b/user/xargs.c
+@@ -0,0 +1,66 @@
++#include "kernel/types.h"
++#include "user/user.h"
++#include "kernel/param.h"
++
++int
++main(int argc, char *argv[])
++{
++    int i, j;
++    int exec_argc;
++    int pid;
++    char buf[100];
++    char c;
++    char *p;
++    char *execargv[MAXARG];
++
++    if(argc < 2){
++        fprintf(2, "Usage: xargs <exec>\n");
++        exit(1);
++    }
++
++    for(i = 0; i < argc-1; i++){
++        execargv[i] = argv[i+1];
++    }
++    exec_argc = i;
++
++    j = 0;
++    p = buf;
++    while(1){
++        int n = read(0, &c, sizeof(char));
++        if(n <= 0){
++            break;
++        }
++
++        if(c == ' '){
++            buf[j] = '\0';
++            j++;
++            if(*p != '\0'){
++                execargv[i] = p;
++                i++;
++            }
++            p = &buf[j];
++        } else if(c == '\n'){
++            buf[j] = '\0';
++            if(*p != '\0'){
++                execargv[i] = p;
++                i++;
++            }
++            execargv[i] = (char *)0;
++            pid = fork();
++            if(pid == 0){
++                exec(execargv[0], execargv);
++                printf("exec failed!\n");
++                exit(1);
++            }
++            j = 0;
++            p = buf;
++            i = exec_argc;
++        } else {
++            buf[j] = c;
++            j++;
++        }
++    }
++
++    while(wait((int *)0) > 0){}
++    exit(0);
++}
