@@ -1,0 +1,170 @@
+commit 7c486e54dcd1cb2c22f08132b7447b00e02aaab0
+Author: h811044 <142477229+h811044@users.noreply.github.com>
+Date:   Wed Sep 27 22:41:28 2023 +0800
+
+    Lab: page tables
+
+diff --git a/kernel/defs.h b/kernel/defs.h
+index 3564db4..d9e41e6 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -170,6 +170,8 @@ uint64          walkaddr(pagetable_t, uint64);
+ int             copyout(pagetable_t, uint64, char *, uint64);
+ int             copyin(pagetable_t, char *, uint64, uint64);
+ int             copyinstr(pagetable_t, char *, uint64, uint64);
++void            vmprint(pagetable_t);
++int             pgaccess(pagetable_t, uint64, int, uint64);
+ 
+ // plic.c
+ void            plicinit(void);
+diff --git a/kernel/exec.c b/kernel/exec.c
+index d62d29d..c9d1d4b 100644
+--- a/kernel/exec.c
++++ b/kernel/exec.c
+@@ -116,6 +116,9 @@ exec(char *path, char **argv)
+   p->trapframe->sp = sp; // initial stack pointer
+   proc_freepagetable(oldpagetable, oldsz);
+ 
++  if(p->pid==1)
++    vmprint(p->pagetable);
++
+   return argc; // this ends up in a0, the first argument to main(argc, argv)
+ 
+  bad:
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 22e7ce4..b2e82f9 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -196,6 +196,25 @@ proc_pagetable(struct proc *p)
+     return 0;
+   }
+ 
++#ifdef LAB_PGTBL
++  // map the USYSCALL just below TRAPFRAME, for ugetpid().
++  struct usyscall *pa = (struct usyscall *)kalloc();
++  if(pa == 0){
++    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
++    uvmunmap(pagetable, TRAPFRAME, 1, 0);
++    uvmfree(pagetable, 0);
++    return 0;
++  }
++  pa->pid = p->pid;
++  if(mappages(pagetable, USYSCALL, PGSIZE,
++              (uint64)pa, PTE_R | PTE_U) < 0){
++    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
++    uvmunmap(pagetable, TRAPFRAME, 1, 0);
++    uvmfree(pagetable, 0);
++    return 0;
++  }
++#endif
++
+   return pagetable;
+ }
+ 
+@@ -206,6 +225,9 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
+ {
+   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+   uvmunmap(pagetable, TRAPFRAME, 1, 0);
++#ifdef LAB_PGTBL
++  uvmunmap(pagetable, USYSCALL, 1, 1);
++#endif
+   uvmfree(pagetable, sz);
+ }
+ 
+diff --git a/kernel/riscv.h b/kernel/riscv.h
+index 1691faf..5bbde3d 100644
+--- a/kernel/riscv.h
++++ b/kernel/riscv.h
+@@ -343,6 +343,7 @@ sfence_vma()
+ #define PTE_W (1L << 2)
+ #define PTE_X (1L << 3)
+ #define PTE_U (1L << 4) // 1 -> user can access
++#define PTE_A (1L << 6) // Accessed
+ 
+ // shift a physical address to the right place for a PTE.
+ #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 3bd0007..d770738 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -81,7 +81,18 @@ int
+ sys_pgaccess(void)
+ {
+   // lab pgtbl: your code here.
+-  return 0;
++  uint64 base;
++  int len;
++  uint64 mask;
++
++  if(argaddr(0, &base) < 0)
++    return -1;
++  if(argint(1, &len) < 0)
++    return -1;
++  if(argaddr(2, &mask) < 0)
++    return -1;
++
++  return pgaccess(myproc()->pagetable, base, len, mask);
+ }
+ #endif
+ 
+diff --git a/kernel/vm.c b/kernel/vm.c
+index d5a12a0..0ad3b5f 100644
+--- a/kernel/vm.c
++++ b/kernel/vm.c
+@@ -432,3 +432,56 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
+     return -1;
+   }
+ }
++
++void
++vmprint(pagetable_t pagetable)
++{
++  printf("page table %p\n", pagetable);
++
++  for(int i2 = 0; i2 < 512; i2++) { // L2 pagetable
++    pte_t *pte = &pagetable[i2];
++    if(*pte & PTE_V) {
++      pagetable_t pa1 = (pagetable_t)PTE2PA(*pte);
++      printf(" ..%d: pte %p pa %p\n", i2, *pte, pa1);
++
++      for(int i1 = 0; i1 < 512; i1++) { // L1 pagetable
++        pte = &pa1[i1];
++        if(*pte & PTE_V) {
++          pagetable_t pa0 = (pagetable_t)PTE2PA(*pte);
++          printf(" .. ..%d: pte %p pa %p\n", i1, *pte, pa0);
++
++          for(int i0 = 0; i0 < 512; i0++) { // L0 pagetable
++            pte = &pa0[i0];
++            if(*pte & PTE_V) {
++              printf(" .. .. ..%d: pte %p pa %p\n", i0, *pte, PTE2PA(*pte));
++            }
++          } // L0 pagetable
++
++        }
++      } // L1 pagetable
++
++    }
++  } // L2 pagetable
++}
++
++int
++pgaccess(pagetable_t pagetable, uint64 base, int len, uint64 mask)
++{
++  unsigned int abits = 0;
++  pte_t *pte;
++  uint64 va;
++
++  for(int i = 0; i < len; i++) {
++    va = base + PGSIZE * i;
++    if(va >= MAXVA)
++      return -1;
++    pte = walk(pagetable, va, 0);
++    if(pte == 0)
++      continue;
++    if((*pte & PTE_A) != 0)
++      abits |= (1 << i);
++    *pte &= ~PTE_A;
++  }
++
++  return copyout(pagetable, mask, (char *)&abits, sizeof(abits));
++}
