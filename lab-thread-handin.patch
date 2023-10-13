@@ -1,0 +1,143 @@
+commit 4514a7ff95c787ba841ce4c1e2ee698ccd53abea
+Author: h811044 <142477229+h811044@users.noreply.github.com>
+Date:   Fri Oct 13 15:41:16 2023 +0800
+
+    Lab: Multithreading
+
+diff --git a/notxv6/barrier.c b/notxv6/barrier.c
+index 12793e8..e977aee 100644
+--- a/notxv6/barrier.c
++++ b/notxv6/barrier.c
+@@ -30,6 +30,21 @@ barrier()
+   // Block until all threads have called barrier() and
+   // then increment bstate.round.
+   //
++  pthread_mutex_lock(&bstate.barrier_mutex);
++  bstate.nthread++;
++  if (bstate.nthread == nthread) {
++    bstate.round++;
++    pthread_cond_broadcast(&bstate.barrier_cond);
++  } else {
++    pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
++  }
++  bstate.nthread--;
++  if (bstate.nthread == 0) {
++    pthread_cond_broadcast(&bstate.barrier_cond);
++  } else {
++    pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
++  }
++  pthread_mutex_unlock(&bstate.barrier_mutex);
+   
+ }
+ 
+diff --git a/notxv6/ph.c b/notxv6/ph.c
+index 82afe76..d31a9ed 100644
+--- a/notxv6/ph.c
++++ b/notxv6/ph.c
+@@ -14,6 +14,7 @@ struct entry {
+   struct entry *next;
+ };
+ struct entry *table[NBUCKET];
++pthread_mutex_t lock[NBUCKET]; // declare a lock
+ int keys[NKEYS];
+ int nthread = 1;
+ 
+@@ -47,6 +48,7 @@ void put(int key, int value)
+     if (e->key == key)
+       break;
+   }
++  pthread_mutex_lock(&lock[i]); // acquire lock
+   if(e){
+     // update the existing key.
+     e->value = value;
+@@ -54,6 +56,7 @@ void put(int key, int value)
+     // the new is new.
+     insert(key, value, &table[i], table[i]);
+   }
++  pthread_mutex_unlock(&lock[i]); // release lock
+ 
+ }
+ 
+@@ -117,6 +120,9 @@ main(int argc, char *argv[])
+   for (int i = 0; i < NKEYS; i++) {
+     keys[i] = random();
+   }
++  for(int i = 0; i < NBUCKET; i++) {
++    assert(pthread_mutex_init(&lock[i], NULL) == 0); // initialize the lock
++  }
+ 
+   //
+   // first the puts
+diff --git a/user/uthread.c b/user/uthread.c
+index 06349f5..2071009 100644
+--- a/user/uthread.c
++++ b/user/uthread.c
+@@ -10,6 +10,9 @@
+ #define STACK_SIZE  8192
+ #define MAX_THREAD  4
+ 
++#define REG         0
++#define RA          (REG + 0)
++#define SP          (REG + 8)
+ 
+ struct thread {
+   char       stack[STACK_SIZE]; /* the thread's stack */
+@@ -62,6 +65,7 @@ thread_schedule(void)
+      * Invoke thread_switch to switch from t to next_thread:
+      * thread_switch(??, ??);
+      */
++    thread_switch((uint64)&t->stack[REG], (uint64)&current_thread->stack[REG]);
+   } else
+     next_thread = 0;
+ }
+@@ -76,6 +80,11 @@ thread_create(void (*func)())
+   }
+   t->state = RUNNABLE;
+   // YOUR CODE HERE
++  uint64 *reg;
++  reg = (uint64 *)&t->stack[RA];
++  *reg = (uint64)func;
++  reg = (uint64 *)&t->stack[SP];
++  *reg = (uint64)&t->stack[STACK_SIZE - 1];
+ }
+ 
+ void 
+diff --git a/user/uthread_switch.S b/user/uthread_switch.S
+index 5defb12..02206a6 100644
+--- a/user/uthread_switch.S
++++ b/user/uthread_switch.S
+@@ -8,4 +8,34 @@
+ 	.globl thread_switch
+ thread_switch:
+ 	/* YOUR CODE HERE */
++    sd ra, 0(a0)
++    sd sp, 8(a0)
++    sd s0, 16(a0)
++    sd s1, 24(a0)
++    sd s2, 32(a0)
++    sd s3, 40(a0)
++    sd s4, 48(a0)
++    sd s5, 56(a0)
++    sd s6, 64(a0)
++    sd s7, 72(a0)
++    sd s8, 80(a0)
++    sd s9, 88(a0)
++    sd s10, 96(a0)
++    sd s11, 104(a0)
++
++    ld ra, 0(a1)
++    ld sp, 8(a1)
++    ld s0, 16(a1)
++    ld s1, 24(a1)
++    ld s2, 32(a1)
++    ld s3, 40(a1)
++    ld s4, 48(a1)
++    ld s5, 56(a1)
++    ld s6, 64(a1)
++    ld s7, 72(a1)
++    ld s8, 80(a1)
++    ld s9, 88(a1)
++    ld s10, 96(a1)
++    ld s11, 104(a1)
++
+ 	ret    /* return to ra */
